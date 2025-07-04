@@ -3,8 +3,11 @@
 import colorsys
 import sys
 import time
+import json
+from datetime import datetime, timedelta
 
 import st7735
+from azure.storage.blob import BlobServiceClient
 
 try:
     # Transitional fix for breaking change in LTR559
@@ -130,10 +133,63 @@ values = {}
 for v in variables:
     values[v] = [1] * WIDTH
 
+# Azure Blob Storage configuration
+AZURE_STORAGE_CONNECTION_STRING = "<YOUR_AZURE_STORAGE_CONNECTION_STRING>"
+AZURE_CONTAINER_NAME = "<YOUR_CONTAINER_NAME>"
+
+# Buffer for 5-minute averages
+AVG_INTERVAL = 300  # seconds
+sample_buffer = {v: [] for v in variables}
+start_time = datetime.utcnow()
+
+# Initialize Azure Blob client
+blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+container_client = blob_service_client.get_container_client(AZURE_CONTAINER_NAME)
+
 # The main loop
 try:
     while True:
         proximity = ltr559.get_proximity()
+
+        # Collect all sensor data every loop
+        cpu_temp = get_cpu_temperature()
+        cpu_temps = cpu_temps[1:] + [cpu_temp]
+        avg_cpu_temp = sum(cpu_temps) / float(len(cpu_temps))
+        raw_temp = bme280.get_temperature()
+        temperature = raw_temp - ((avg_cpu_temp - raw_temp) / factor)
+        pressure = bme280.get_pressure()
+        humidity = bme280.get_humidity()
+        if proximity < 10:
+            light_val = ltr559.get_lux()
+        else:
+            light_val = 1
+        gas_data = gas.read_all()
+        oxidised = gas_data.oxidising / 1000
+        reduced = gas_data.reducing / 1000
+        nh3 = gas_data.nh3 / 1000
+        try:
+            pm_data = pms5003.read()
+            pm1 = float(pm_data.pm_ug_per_m3(1.0))
+            pm25 = float(pm_data.pm_ug_per_m3(2.5))
+            pm10 = float(pm_data.pm_ug_per_m3(10))
+        except pmsReadTimeoutError:
+            logging.warning("Failed to read PMS5003")
+            pm1 = pm25 = pm10 = None
+
+        # Append all metrics to their buffers
+        sample_buffer["temperature"].append(temperature)
+        sample_buffer["pressure"].append(pressure)
+        sample_buffer["humidity"].append(humidity)
+        sample_buffer["light"].append(light_val)
+        sample_buffer["oxidised"].append(oxidised)
+        sample_buffer["reduced"].append(reduced)
+        sample_buffer["nh3"].append(nh3)
+        if pm1 is not None:
+            sample_buffer["pm1"].append(pm1)
+        if pm25 is not None:
+            sample_buffer["pm25"].append(pm25)
+        if pm10 is not None:
+            sample_buffer["pm10"].append(pm10)
 
         # If the proximity crosses the threshold, toggle the mode
         if proximity > 1500 and time.time() - last_page > delay:
@@ -141,92 +197,80 @@ try:
             mode %= len(variables)
             last_page = time.time()
 
-        # One mode for each variable
+        # Display only the current mode
         if mode == 0:
-            # variable = "temperature"
             unit = "°C"
-            cpu_temp = get_cpu_temperature()
-            # Smooth out with some averaging to decrease jitter
-            cpu_temps = cpu_temps[1:] + [cpu_temp]
-            avg_cpu_temp = sum(cpu_temps) / float(len(cpu_temps))
-            raw_temp = bme280.get_temperature()
-            data = raw_temp - ((avg_cpu_temp - raw_temp) / factor)
-            display_text(variables[mode], data, unit)
-
+            display_text("temperature", temperature, unit)
         if mode == 1:
-            # variable = "pressure"
             unit = "hPa"
-            data = bme280.get_pressure()
-            display_text(variables[mode], data, unit)
-
+            display_text("pressure", pressure, unit)
         if mode == 2:
-            # variable = "humidity"
             unit = "%"
-            data = bme280.get_humidity()
-            display_text(variables[mode], data, unit)
-
+            display_text("humidity", humidity, unit)
         if mode == 3:
-            # variable = "light"
             unit = "Lux"
-            if proximity < 10:
-                data = ltr559.get_lux()
-            else:
-                data = 1
-            display_text(variables[mode], data, unit)
-
+            display_text("light", light_val, unit)
         if mode == 4:
-            # variable = "oxidised"
             unit = "kO"
-            data = gas.read_all()
-            data = data.oxidising / 1000
-            display_text(variables[mode], data, unit)
-
+            display_text("oxidised", oxidised, unit)
         if mode == 5:
-            # variable = "reduced"
             unit = "kO"
-            data = gas.read_all()
-            data = data.reducing / 1000
-            display_text(variables[mode], data, unit)
-
+            display_text("reduced", reduced, unit)
         if mode == 6:
-            # variable = "nh3"
             unit = "kO"
-            data = gas.read_all()
-            data = data.nh3 / 1000
-            display_text(variables[mode], data, unit)
-
+            display_text("nh3", nh3, unit)
         if mode == 7:
-            # variable = "pm1"
             unit = "ug/m3"
-            try:
-                data = pms5003.read()
-            except pmsReadTimeoutError:
-                logging.warning("Failed to read PMS5003")
-            else:
-                data = float(data.pm_ug_per_m3(1.0))
-                display_text(variables[mode], data, unit)
-
+            if pm1 is not None:
+                display_text("pm1", pm1, unit)
         if mode == 8:
-            # variable = "pm25"
             unit = "ug/m3"
-            try:
-                data = pms5003.read()
-            except pmsReadTimeoutError:
-                logging.warning("Failed to read PMS5003")
-            else:
-                data = float(data.pm_ug_per_m3(2.5))
-                display_text(variables[mode], data, unit)
-
+            if pm25 is not None:
+                display_text("pm25", pm25, unit)
         if mode == 9:
-            # variable = "pm10"
             unit = "ug/m3"
-            try:
-                data = pms5003.read()
-            except pmsReadTimeoutError:
-                logging.warning("Failed to read PMS5003")
-            else:
-                data = float(data.pm_ug_per_m3(10))
-                display_text(variables[mode], data, unit)
+            if pm10 is not None:
+                display_text("pm10", pm10, unit)
+
+        # Every 5 minutes, compute averages and send to Azure
+        now = datetime.utcnow()
+        if (now - start_time).total_seconds() >= AVG_INTERVAL:
+            avg_data = {}
+            for v in variables:
+                if sample_buffer[v]:
+                    avg_data[v] = sum(sample_buffer[v]) / len(sample_buffer[v])
+                else:
+                    avg_data[v] = None
+            # ECS formatting
+            ecs_doc = {
+                "@timestamp": now.isoformat() + "Z",
+                "event": {"kind": "metric", "category": ["environmental"], "type": ["info"]},
+                "host": {"hostname": "enviroplus"},
+                "sensor": {
+                    "temperature": avg_data["temperature"],
+                    "pressure": avg_data["pressure"],
+                    "humidity": avg_data["humidity"],
+                    "light": avg_data["light"],
+                    "gas": {
+                        "oxidised": avg_data["oxidised"],
+                        "reduced": avg_data["reduced"],
+                        "nh3": avg_data["nh3"]
+                    },
+                    "pm": {
+                        "pm1": avg_data["pm1"],
+                        "pm25": avg_data["pm25"],
+                        "pm10": avg_data["pm10"]
+                    }
+                }
+            }
+            # Upload to Azure Blob Storage
+            blob_name = f"enviroplus_{now.strftime('%Y%m%dT%H%M%S')}.json"
+            blob_client = container_client.get_blob_client(blob_name)
+            blob_client.upload_blob(json.dumps(ecs_doc), overwrite=True)
+            logging.info(f"Uploaded ECS data to Azure Blob: {blob_name}")
+            # Reset buffer and timer
+            sample_buffer = {v: [] for v in variables}
+            start_time = now
 
 # Exit cleanly
 except KeyboardInterrupt:
