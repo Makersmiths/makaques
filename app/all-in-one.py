@@ -18,7 +18,7 @@ except ImportError:
 
 import logging
 
-from bme280 import BME280
+from bme280 import bme280
 from fonts.ttf import RobotoMedium as UserFont
 from PIL import Image, ImageDraw, ImageFont
 from pms5003 import PMS5003
@@ -38,7 +38,7 @@ Press Ctrl+C to exit!
 """)
 
 # BME280 temperature/pressure/humidity sensor
-bme280 = BME280()
+bme280 = bme280()
 
 # PMS5003 particulate sensor
 pms5003 = PMS5003()
